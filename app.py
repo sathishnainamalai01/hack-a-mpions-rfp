@@ -1,107 +1,87 @@
 import streamlit as st
 from google import genai
-import pandas as pd
-import json
 import os
 import time
 
-# --- 1. CLOUD STORAGE (SESSION STATE) ---
-st.set_page_config(page_title="RFP Master Auditor", layout="wide", page_icon="🏆")
+# --- 1. MEMORY SETUP ---
+st.set_page_config(page_title="RFP Chat Auditor", layout="centered", page_icon="💬")
 
-# These variables stay in the app's memory even when the page reruns
-if 'master_table' not in st.session_state:
-    st.session_state.master_table = []
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
+if 'uploaded_file_ids' not in st.session_state:
+    st.session_state.uploaded_file_ids = []
 
-# --- 2. SIDEBAR CONTROLS ---
+# --- 2. SIDEBAR ---
 with st.sidebar:
     st.title("🏆 Hack-A-Mpions")
-    st.info("v2026.8 - Cloud Stable")
     api_key = st.text_input("Gemini API Key", type="password")
     
     st.divider()
-    if st.button("🗑️ Clear All Memory"):
-        st.session_state.master_table = []
+    if st.button("🗑️ Clear Chat & Files"):
         st.session_state.chat_history = []
+        st.session_state.uploaded_file_ids = []
         st.rerun()
+    
+    if st.session_state.uploaded_file_ids:
+        st.success(f"📂 {len(st.session_state.uploaded_file_ids)} Files Loaded")
 
-# --- 3. EXTRACTION INTERFACE ---
-st.title("📄 RFP Deep Condition Extractor")
+# --- 3. UPLOAD SECTION ---
+st.title("💬 Chat with your RFPs")
+st.caption("Upload your PDFs first, then ask questions below.")
 
 if api_key:
     client = genai.Client(api_key=api_key)
     MODEL_ID = "gemini-2.0-flash-lite"
 
-    files = st.file_uploader("Upload RFP PDFs", type="pdf", accept_multiple_files=True)
+    uploaded_pdfs = st.file_uploader("Upload RFP PDFs", type="pdf", accept_multiple_files=True)
 
-    if files and st.button("🚀 Start Analysis"):
-        for f in files:
-            with st.status(f"Processing {f.name}...") as status:
+    if uploaded_pdfs and st.button("📥 Load Documents into Chat"):
+        for f in uploaded_pdfs:
+            with st.spinner(f"Reading {f.name}..."):
                 t_path = f"temp_{f.name}"
                 with open(t_path, "wb") as tmp: tmp.write(f.getbuffer())
                 
-                # Upload to Google
+                # Upload to Google AI's permanent session memory
                 g_file = client.files.upload(file=t_path)
                 while g_file.state == "PROCESSING":
-                    time.sleep(2)
+                    time.sleep(1)
                     g_file = client.files.get(name=g_file.name)
                 
-                # THE 8 CONDITIONS PROMPT
-                prompt = """
-                Extract the following as a JSON object:
-                Customer, Tender_ID, EMD_Details, Min_Turnover, 
-                Eligibility_Criteria, Bid_Validity, PBG_Percent, Penalty_Summary.
-                """
-                
-                try:
-                    response = client.models.generate_content(model=MODEL_ID, contents=[g_file, prompt])
-                    # Clean and Parse JSON
-                    raw_json = response.text.replace('```json', '').replace('```', '').strip()
-                    data = json.loads(raw_json)
-                    data['Source_File'] = f.name
-                    
-                    # SAVE TO MASTER MEMORY
-                    st.session_state.master_table.append(data)
-                    status.update(label=f"✅ {f.name} Ready", state="complete")
-                except Exception as e:
-                    st.error(f"Failed to extract {f.name}. Error: {e}")
-                
+                st.session_state.uploaded_file_ids.append(g_file)
                 os.remove(t_path)
-                time.sleep(5) # Rate limit gap
         
-        # After loop, force a rerun to refresh the UI and show the table
-        st.rerun()
+        st.success("Documents Loaded! You can now chat with them below.")
 
-# --- 4. THE OUTPUT AREA (STAYS VISIBLE) ---
-# This block is OUTSIDE the button logic so it never disappears
-if st.session_state.master_table:
+# --- 4. THE CHAT INTERFACE ---
+if st.session_state.uploaded_file_ids:
     st.divider()
-    st.subheader("📊 Extracted RFP Table")
     
-    # Create the DataFrame
-    df = pd.DataFrame(st.session_state.master_table)
-    
-    # Display using st.table for guaranteed visibility
-    st.table(df)
-
-    # --- 5. CHAT BOX (PERSISTENT) ---
-    st.divider()
-    st.subheader("💬 Chat Analysis")
-    
-    # Render existing chat
+    # Display message history
     for chat in st.session_state.chat_history:
         with st.chat_message(chat["role"]):
             st.markdown(chat["content"])
 
-    # Chat input
-    if user_q := st.chat_input("Ask a question about the table..."):
-        st.session_state.chat_history.append({"role": "user", "content": user_q})
-        with st.chat_message("user"): st.markdown(user_q)
+    # Chat Input Box
+    if user_query := st.chat_input("Ex: What is the EMD and Turnover required in these files?"):
+        # 1. Show user message
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
 
+        # 2. Generate AI response using the uploaded files as context
         with st.chat_message("assistant"):
-            # Provide the table context to the AI
-            table_context = df.to_string()
-            chat_res = client.models.generate_content(model=MODEL_ID, contents=[table_context, user_q])
-            st.markdown(chat_res.text)
-            st.session_state.chat_history.append({"role": "assistant", "content": chat_res.text})
+            with st.spinner("Thinking..."):
+                # We send all uploaded files + the user question
+                content_payload = st.session_state.uploaded_file_ids + [user_query]
+                
+                try:
+                    response = client.models.generate_content(
+                        model=MODEL_ID, 
+                        contents=content_payload
+                    )
+                    st.markdown(response.text)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response.text})
+                except Exception as e:
+                    st.error(f"Error: {e}")
+else:
+    st.info("Upload and 'Load' your documents to start the conversation.")
