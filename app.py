@@ -5,27 +5,28 @@ import json
 import os
 import time
 
-# --- 1. GLOBAL SETTINGS & MEMORY ---
+# --- 1. CLOUD STORAGE (SESSION STATE) ---
 st.set_page_config(page_title="RFP Master Auditor", layout="wide", page_icon="🏆")
 
-# Initialize memory stores
-if 'rfp_data' not in st.session_state:
-    st.session_state.rfp_data = []
+# These variables stay in the app's memory even when the page reruns
+if 'master_table' not in st.session_state:
+    st.session_state.master_table = []
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 
-# --- 2. SIDEBAR ---
+# --- 2. SIDEBAR CONTROLS ---
 with st.sidebar:
     st.title("🏆 Hack-A-Mpions")
+    st.info("v2026.8 - Cloud Stable")
     api_key = st.text_input("Gemini API Key", type="password")
     
     st.divider()
-    if st.button("🗑️ Wipe All Data"):
-        st.session_state.rfp_data = []
+    if st.button("🗑️ Clear All Memory"):
+        st.session_state.master_table = []
         st.session_state.chat_history = []
         st.rerun()
 
-# --- 3. EXTRACTION LOGIC ---
+# --- 3. EXTRACTION INTERFACE ---
 st.title("📄 RFP Deep Condition Extractor")
 
 if api_key:
@@ -36,65 +37,71 @@ if api_key:
 
     if files and st.button("🚀 Start Analysis"):
         for f in files:
-            with st.status(f"Scanning {f.name}...") as status:
+            with st.status(f"Processing {f.name}...") as status:
                 t_path = f"temp_{f.name}"
                 with open(t_path, "wb") as tmp: tmp.write(f.getbuffer())
                 
+                # Upload to Google
                 g_file = client.files.upload(file=t_path)
                 while g_file.state == "PROCESSING":
                     time.sleep(2)
                     g_file = client.files.get(name=g_file.name)
                 
+                # THE 8 CONDITIONS PROMPT
                 prompt = """
-                Extract these 8 conditions as a JSON object: 
-                Customer, Tender_ID, EMD_Amount, Min_Turnover, 
+                Extract the following as a JSON object:
+                Customer, Tender_ID, EMD_Details, Min_Turnover, 
                 Eligibility_Criteria, Bid_Validity, PBG_Percent, Penalty_Summary.
                 """
                 
                 try:
                     response = client.models.generate_content(model=MODEL_ID, contents=[g_file, prompt])
-                    # FAIL-SAFE: If JSON fails, we still save the raw text
-                    clean_text = response.text.replace('```json', '').replace('```', '').strip()
-                    try:
-                        data = json.loads(clean_text)
-                    except:
-                        data = {"Raw_Output": clean_text} # Fallback if JSON is broken
+                    # Clean and Parse JSON
+                    raw_json = response.text.replace('```json', '').replace('```', '').strip()
+                    data = json.loads(raw_json)
+                    data['Source_File'] = f.name
                     
-                    data['Filename'] = f.name
-                    st.session_state.rfp_data.append(data)
-                    status.update(label=f"✅ {f.name} Extracted", state="complete")
+                    # SAVE TO MASTER MEMORY
+                    st.session_state.master_table.append(data)
+                    status.update(label=f"✅ {f.name} Ready", state="complete")
                 except Exception as e:
-                    st.error(f"Critical Error: {e}")
+                    st.error(f"Failed to extract {f.name}. Error: {e}")
                 
                 os.remove(t_path)
-                time.sleep(5) 
+                time.sleep(5) # Rate limit gap
         
-        st.rerun() # Force UI Update
+        # After loop, force a rerun to refresh the UI and show the table
+        st.rerun()
 
-# --- 4. THE OUTPUT (LOCKED OUTSIDE THE BUTTON) ---
-# If this block is not showing, check your requirements.txt for 'pandas'
-if st.session_state.rfp_data:
+# --- 4. THE OUTPUT AREA (STAYS VISIBLE) ---
+# This block is OUTSIDE the button logic so it never disappears
+if st.session_state.master_table:
     st.divider()
-    st.subheader("📊 Extracted Data")
+    st.subheader("📊 Extracted RFP Table")
     
-    df = pd.DataFrame(st.session_state.rfp_data)
-    # Ensure it displays as a table
-    st.table(df) # Using st.table instead of st.dataframe for better cloud visibility
+    # Create the DataFrame
+    df = pd.DataFrame(st.session_state.master_table)
+    
+    # Display using st.table for guaranteed visibility
+    st.table(df)
 
-    # --- 5. THE CHAT BOX ---
+    # --- 5. CHAT BOX (PERSISTENT) ---
     st.divider()
-    st.subheader("💬 Analysis Chat")
+    st.subheader("💬 Chat Analysis")
     
+    # Render existing chat
     for chat in st.session_state.chat_history:
         with st.chat_message(chat["role"]):
             st.markdown(chat["content"])
 
-    if user_q := st.chat_input("Ask a question..."):
+    # Chat input
+    if user_q := st.chat_input("Ask a question about the table..."):
         st.session_state.chat_history.append({"role": "user", "content": user_q})
         with st.chat_message("user"): st.markdown(user_q)
 
         with st.chat_message("assistant"):
-            context = f"Table Data: {df.to_string()}"
-            chat_res = client.models.generate_content(model=MODEL_ID, contents=[context, user_q])
+            # Provide the table context to the AI
+            table_context = df.to_string()
+            chat_res = client.models.generate_content(model=MODEL_ID, contents=[table_context, user_q])
             st.markdown(chat_res.text)
             st.session_state.chat_history.append({"role": "assistant", "content": chat_res.text})
