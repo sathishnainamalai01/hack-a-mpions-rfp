@@ -4,59 +4,31 @@ import pandas as pd
 import json
 import os
 import time
-import random
 
-# --- 1. PERSISTENCE & UI SETUP ---
-st.set_page_config(page_title="Hack-A-Mpions Auditor", layout="wide", page_icon="🏆")
+# --- 1. GLOBAL SETTINGS & MEMORY ---
+st.set_page_config(page_title="RFP Master Auditor", layout="wide", page_icon="🏆")
 
-if 'rfp_master_data' not in st.session_state:
-    st.session_state.rfp_master_data = []
+# These keys ensure your data survives script reruns
+if 'rfp_data' not in st.session_state:
+    st.session_state.rfp_data = []
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
-if 'cooldown_until' not in st.session_state:
-    st.session_state.cooldown_until = 0
 
-# --- 2. SIDEBAR (STATUS INDICATOR) ---
+# --- 2. SIDEBAR (STATUS & API) ---
 with st.sidebar:
-    st.markdown("## 🏆 Hack-A-Mpions")
-    
-    # LIVE STATUS INDICATOR
-    current_time = time.time()
-    if current_time < st.session_state.cooldown_until:
-        remaining = int(st.session_state.cooldown_until - current_time)
-        st.error(f"🔴 API STATUS: COOLING DOWN ({remaining}s)")
-        st.caption("Please wait for the timer to hit 0 before processing.")
-    else:
-        st.success("🟢 API STATUS: READY")
-        st.caption("Ready for next RFP extraction.")
-
-    st.divider()
+    st.markdown("## ⚙️ Control Center")
     api_key = st.text_input("Gemini API Key", type="password")
     
-    if st.button("🗑️ Reset App & Clear Memory"):
-        st.session_state.rfp_master_data = []
+    st.divider()
+    if st.button("🗑️ Wipe All Data"):
+        st.session_state.rfp_data = []
         st.session_state.chat_history = []
-        st.session_state.cooldown_until = 0
         st.rerun()
+    
+    if st.session_state.rfp_data:
+        st.success(f"Files in Memory: {len(st.session_state.rfp_data)}")
 
-# --- 3. THE SAFE EXTRACTION ENGINE ---
-def safe_google_call(client, model, contents):
-    for attempt in range(3):
-        try:
-            return client.models.generate_content(model=model, contents=contents)
-        except Exception as e:
-            if "429" in str(e):
-                # Set the sidebar to RED for 60 seconds
-                st.session_state.cooldown_until = time.time() + 60
-                st.warning(f"⚠️ Limit hit. Locking UI for 60s cooldown...")
-                time.sleep(60)
-                return None # Stop current loop to prevent "poking the bear"
-            else:
-                st.error(f"Error: {e}")
-                return None
-    return None
-
-# --- 4. MAIN INTERFACE ---
+# --- 3. EXTRACTION LOGIC (INPUT) ---
 st.title("📄 RFP Deep Condition Extractor")
 
 if api_key:
@@ -65,68 +37,77 @@ if api_key:
 
     files = st.file_uploader("Upload RFP PDFs", type="pdf", accept_multiple_files=True)
 
-    # Disable button if cooling down
-    btn_disabled = time.time() < st.session_state.cooldown_until
-    
-    if files and st.button("🚀 Run Deep Extraction", disabled=btn_disabled):
-        new_results = []
+    if files and st.button("🚀 Start Deep Analysis"):
+        temp_batch = []
         for f in files:
-            with st.status(f"Analyzing {f.name}...") as status:
+            with st.status(f"Scanning {f.name}...") as status:
+                # Save to temporary cloud storage
                 t_path = f"temp_{f.name}"
                 with open(t_path, "wb") as tmp: tmp.write(f.getbuffer())
                 
+                # Upload to Google AI
                 g_file = client.files.upload(file=t_path)
                 while g_file.state == "PROCESSING":
                     time.sleep(2)
                     g_file = client.files.get(name=g_file.name)
                 
+                # THE 8 KEY CONDITIONS PROMPT
                 prompt = """
-                Extract these 8 conditions as JSON:
-                1. Customer Name, 2. Tender ID, 3. EMD Amount/Mode, 
-                4. Min Turnover, 5. Technical Eligibility, 6. Bid Validity, 
-                7. PBG %, 8. Penalty Summary.
+                Return ONLY a JSON object with these keys: 
+                Customer, Tender_ID, EMD_Amount, Min_Turnover, 
+                Eligibility_Criteria, Bid_Validity, PBG_Percent, Penalty_Summary.
                 """
                 
-                response = safe_google_call(client, MODEL_ID, [g_file, prompt])
-                
-                if response:
-                    try:
-                        raw_text = response.text.replace('```json', '').replace('```', '').strip()
-                        data = json.loads(raw_text)
-                        data['Filename'] = f.name
-                        new_results.append(data)
-                        status.update(label=f"✅ {f.name} Completed", state="complete")
-                    except:
-                        st.error(f"JSON Error in {f.name}")
+                try:
+                    response = client.models.generate_content(model=MODEL_ID, contents=[g_file, prompt])
+                    # Strip markdown and parse JSON
+                    clean_text = response.text.replace('```json', '').replace('```', '').strip()
+                    data = json.loads(clean_text)
+                    data['Filename'] = f.name
+                    temp_batch.append(data)
+                    status.update(label=f"✅ {f.name} Extracted", state="complete")
+                except Exception as e:
+                    st.error(f"Error in {f.name}: {e}")
                 
                 os.remove(t_path)
-                # Hard 6-second pause between files for local stability
-                time.sleep(6)
+                time.sleep(5) # Crucial 5s gap for Free Tier
         
-        st.session_state.rfp_master_data.extend(new_results)
-        st.rerun() # Refresh to show green status
+        # Save to permanent session state
+        st.session_state.rfp_data.extend(temp_batch)
+        st.rerun() # Force UI to show the table immediately
 
-# --- 5. DATA TABLE OUTPUT ---
-if st.session_state.rfp_master_data:
+# --- 4. THE OUTPUT (ALWAYS VISIBLE IF DATA EXISTS) ---
+if st.session_state.rfp_data:
     st.divider()
-    st.subheader("📊 Extracted RFP Conditions")
-    df = pd.DataFrame(st.session_state.rfp_master_data)
+    st.subheader("📊 Extracted RFP Conditions Table")
+    
+    # Create and Display Table
+    df = pd.DataFrame(st.session_state.rfp_data)
+    # Ensure Filename is the first column for clarity
     cols = ['Filename'] + [c for c in df.columns if c != 'Filename']
     st.dataframe(df[cols], use_container_width=True)
 
-    # --- 6. CHAT BOX ---
+    # --- 5. THE CHAT BOX (ALWAYS AT THE BOTTOM) ---
     st.divider()
-    st.subheader("💬 Chat with your RFPs")
+    st.subheader("💬 RFP Intelligent Chat")
+    st.caption("The AI knows about the table above. Ask anything!")
     
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    # Show previous chat messages
+    for chat in st.session_state.chat_history:
+        with st.chat_message(chat["role"]):
+            st.markdown(chat["content"])
 
-    if user_query := st.chat_input("Ask about the extracted table..."):
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
-        with st.chat_message("user"): st.markdown(user_query)
+    # Chat Input
+    if user_q := st.chat_input("Ask a question about these RFPs..."):
+        st.session_state.chat_history.append({"role": "user", "content": user_q})
+        with st.chat_message("user"):
+            st.markdown(user_q)
 
         with st.chat_message("assistant"):
-            context = f"Data: {df.to_string()}"
-            res = client.models.generate_content(model=MODEL_ID, contents=[context, user_query])
-            st.markdown(res.text)
-            st.session_state.chat_history.append({"role": "assistant", "content": res.text})
+            # Provide the table context to the AI
+            table_context = df.to_string()
+            full_prompt = f"Data: {table_context}\n\nUser Question: {user_q}"
+            
+            chat_res = client.models.generate_content(model=MODEL_ID, contents=[full_prompt])
+            st.markdown(chat_res.text)
+            st.session_state.chat_history.append({"role": "assistant", "content": chat_res.text})
